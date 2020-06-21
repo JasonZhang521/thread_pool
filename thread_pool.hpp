@@ -59,17 +59,17 @@ class ThreadPoolImpl {
   bool TryPost(Handler&& handler, WorkerPriority priority);
 
   /**
-   * @brief post Post job to thread pool.
+   * @brief AddTask AddTask job to thread pool.
    * @param handler Handler to be called from thread pool worker. It has
    * to be callable as 'handler()'.
    * @throw std::overflow_error if worker's queue is full.
    * @note All exceptions thrown by handler will be suppressed.
    */
   template <typename Handler>
-  void Post(Handler&& handler);
+  void AddTask(Handler&& handler);
 
   /**
- * @brief post Post job to thread pool.
+ * @brief AddTask AddTask job to thread pool.
  * @param handler Handler to be called from thread pool worker. It has
  * to be callable as 'handler()'.
  * @param priority task priority
@@ -77,7 +77,7 @@ class ThreadPoolImpl {
  * @note All exceptions thrown by handler will be suppressed.
  */
   template <typename Handler>
-  void Post(Handler&& handler, WorkerPriority priority);
+  void AddTask(Handler&& handler, WorkerPriority priority);
 
  private:
   Worker<Task, Queue>& getWorker(WorkerPriority priority);
@@ -151,12 +151,12 @@ template <typename Task, template <typename> class Queue>
 template <typename Handler>
 inline bool ThreadPoolImpl<Task, Queue>::TryPost(Handler&& handler,
                                                  WorkerPriority priority) {
-  return getWorker(priority).Post(std::forward<Handler>(handler));
+  return getWorker(priority).AddTask(std::forward<Handler>(handler));
 }
 
 template <typename Task, template <typename> class Queue>
 template <typename Handler>
-inline void ThreadPoolImpl<Task, Queue>::Post(Handler&& handler) {
+inline void ThreadPoolImpl<Task, Queue>::AddTask(Handler&& handler) {
   const auto ok = TryPost(std::forward<Handler>(handler), WorkerPriority::LOW);
   if (!ok) {
     throw std::runtime_error("thread pool queue is full");
@@ -165,8 +165,8 @@ inline void ThreadPoolImpl<Task, Queue>::Post(Handler&& handler) {
 
 template <typename Task, template <typename> class Queue>
 template <typename Handler>
-inline void ThreadPoolImpl<Task, Queue>::Post(Handler&& handler,
-                                              WorkerPriority priority) {
+inline void ThreadPoolImpl<Task, Queue>::AddTask(Handler&& handler,
+                                                 WorkerPriority priority) {
   const auto ok = TryPost(std::forward<Handler>(handler), priority);
   if (!ok) {
     throw std::runtime_error("thread pool queue is full");
