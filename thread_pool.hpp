@@ -56,7 +56,7 @@ class ThreadPoolImpl {
    * @note All exceptions thrown by handler will be suppressed.
    */
   template <typename Handler>
-  bool TryPost(Handler&& handler);
+  bool TryPost(Handler&& handler, WorkerPriority priority);
 
   /**
    * @brief post Post job to thread pool.
@@ -68,11 +68,24 @@ class ThreadPoolImpl {
   template <typename Handler>
   void Post(Handler&& handler);
 
- private:
-  Worker<Task, Queue>& getWorker();
+  /**
+ * @brief post Post job to thread pool.
+ * @param handler Handler to be called from thread pool worker. It has
+ * to be callable as 'handler()'.
+ * @param priority task priority
+ * @throw std::overflow_error if worker's queue is full.
+ * @note All exceptions thrown by handler will be suppressed.
+ */
+  template <typename Handler>
+  void Post(Handler&& handler, WorkerPriority priority);
 
-  std::vector<std::unique_ptr<Worker<Task, Queue>>> workers_;
+ private:
+  Worker<Task, Queue>& getWorker(WorkerPriority priority);
+
+  std::vector<std::unique_ptr<Worker<Task, Queue>>> default_workers_;
+  std::vector<std::unique_ptr<Worker<Task, Queue>>> high_priority_workers_;
   std::atomic<size_t> next_worker_id_;
+  std::atomic<size_t> next_high_priority_worker_id_;
 };
 
 /// Implementation
@@ -80,16 +93,28 @@ class ThreadPoolImpl {
 template <typename Task, template <typename> class Queue>
 inline ThreadPoolImpl<Task, Queue>::ThreadPoolImpl(
     const ThreadPoolOptions& options)
-    : workers_(options.ThreadCount()), next_worker_id_(0) {
-  for (auto& worker_ptr : workers_) {
+    : default_workers_(options.ThreadCount() - options.HighPrioritySize()),
+      high_priority_workers_(options.HighPrioritySize()),
+      next_worker_id_(0),
+      next_high_priority_worker_id_(0) {
+  for (auto& worker_ptr : default_workers_) {
     worker_ptr.reset(new Worker<Task, Queue>(options.queueSize()));
   }
 
-  for (size_t i = 0; i < workers_.size(); ++i) {
+  for (auto& worker_ptr : high_priority_workers_) {
+    worker_ptr.reset(new Worker<Task, Queue>(options.queueSize()));
+  }
+
+  for (size_t i = 0; i < default_workers_.size(); ++i) {
     Worker<Task, Queue>* steal_donor =
-        workers_[(i + 1) % workers_.size()].get();
-    i % 2 == 0 ? workers_[i]->Start(i, kWorkerPriorityLow, steal_donor)
-               : workers_[i]->Start(i, kWorkerPriorityHigh, steal_donor);
+        default_workers_[(i + 1) % default_workers_.size()].get();
+    default_workers_[i]->Start(i, kWorkerPriorityLow, steal_donor);
+  }
+
+  for (size_t i = 0; i < high_priority_workers_.size(); ++i) {
+    Worker<Task, Queue>* steal_donor =
+        high_priority_workers_[(i + 1) % high_priority_workers_.size()].get();
+    high_priority_workers_[i]->Start(i, kWorkerPriorityHigh, steal_donor);
   }
 }
 
@@ -101,7 +126,11 @@ inline ThreadPoolImpl<Task, Queue>::ThreadPoolImpl(
 
 template <typename Task, template <typename> class Queue>
 inline ThreadPoolImpl<Task, Queue>::~ThreadPoolImpl() {
-  for (auto& worker_ptr : workers_) {
+  for (auto& worker_ptr : default_workers_) {
+    worker_ptr->Stop();
+  }
+
+  for (auto& worker_ptr : high_priority_workers_) {
     worker_ptr->Stop();
   }
 }
@@ -110,35 +139,67 @@ template <typename Task, template <typename> class Queue>
 inline ThreadPoolImpl<Task, Queue>& ThreadPoolImpl<Task, Queue>::operator=(
     ThreadPoolImpl<Task, Queue>&& rhs) noexcept {
   if (this != &rhs) {
-    workers_ = std::move(rhs.workers_);
+    default_workers_ = std::move(rhs.default_workers_);
+    high_priority_workers_ = std::move(rhs.high_priority_workers_);
     next_worker_id_ = rhs.next_worker_id_.load();
+    next_high_priority_worker_id_ = rhs.next_high_priority_worker_id_.load();
   }
   return *this;
 }
 
 template <typename Task, template <typename> class Queue>
 template <typename Handler>
-inline bool ThreadPoolImpl<Task, Queue>::TryPost(Handler&& handler) {
-  return getWorker().Post(std::forward<Handler>(handler));
+inline bool ThreadPoolImpl<Task, Queue>::TryPost(Handler&& handler,
+                                                 WorkerPriority priority) {
+  return getWorker(priority).Post(std::forward<Handler>(handler));
 }
 
 template <typename Task, template <typename> class Queue>
 template <typename Handler>
 inline void ThreadPoolImpl<Task, Queue>::Post(Handler&& handler) {
-  const auto ok = TryPost(std::forward<Handler>(handler));
+  const auto ok = TryPost(std::forward<Handler>(handler), WorkerPriority::LOW);
   if (!ok) {
     throw std::runtime_error("thread pool queue is full");
   }
 }
 
 template <typename Task, template <typename> class Queue>
-inline Worker<Task, Queue>& ThreadPoolImpl<Task, Queue>::getWorker() {
-  size_t id = 0;
-  if (id < workers_.size()) {
-    id = next_worker_id_.fetch_add(1, std::memory_order_relaxed) %
-         workers_.size();
+template <typename Handler>
+inline void ThreadPoolImpl<Task, Queue>::Post(Handler&& handler,
+                                              WorkerPriority priority) {
+  const auto ok = TryPost(std::forward<Handler>(handler), priority);
+  if (!ok) {
+    throw std::runtime_error("thread pool queue is full");
   }
+}
 
-  return *workers_[id];
+template <typename Task, template <typename> class Queue>
+inline Worker<Task, Queue>& ThreadPoolImpl<Task, Queue>::getWorker(
+    WorkerPriority priority) {
+  switch (priority) {
+    case priority == WorkerPriority::LOW:
+      size_t id = 0;
+      if (id < default_workers_.size()) {
+        id = next_worker_id_.fetch_add(1, std::memory_order_relaxed) %
+             default_workers_.size();
+      }
+
+      return *default_workers_[id];
+      break;
+
+    case priority == WorkerPriority::HIGH:
+      size_t id = 0;
+      if (id < high_priority_workers_.size()) {
+        id = next_high_priority_worker_id_.fetch_add(
+                 1, std::memory_order_relaxed) %
+             high_priority_workers_.size();
+      }
+
+      return *high_priority_workers_[id];
+      break;
+
+    default:
+      break;
+  }
 }
 }
